@@ -6,7 +6,7 @@ from torchvision.datasets import OxfordIIITPet
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 import os
-from model import SimpleCNN, ExperimentCNN1, ExperimentCNN2, ExperimentCNN4
+from model import SimpleCNN, ExperimentCNN1, ExperimentCNN2, ExperimentCNN4, ExperimentCNN5
 from sklearn.metrics import classification_report
 
 # CHOOSE EXPERIMENT HERE
@@ -15,8 +15,9 @@ from sklearn.metrics import classification_report
 # 2 = Dropout + Augmentation
 # 3 = Exp1 + Augmentation + SGD
 # 4 = Deep BN + GAP + Dropout
+# 5 = GeLU + AdamW + Cosine LR + 224x224
 
-EXPERIMENT = 4
+EXPERIMENT = 5
 
 configs = {
     0: {
@@ -55,6 +56,16 @@ configs = {
         "lr": 0.001,
         "augment": False,
     },
+    5: {
+        "name": "Exp5 — GeLU + AdamW + Cosine LR",
+        "model": ExperimentCNN5(num_classes=37),
+        "optimizer": "adamw",
+        "lr": 0.001,
+        "weight_decay": 1e-4,
+        "augment": True,
+        "scheduler": "cosine",
+        "label_smoothing": 0.1,
+    },
 }
 
 config = configs[EXPERIMENT]
@@ -83,9 +94,10 @@ transform_augmented = transforms.Compose([
 ])
 
 train_transform = transform_augmented if config["augment"] else transform_normal
+test_transform = transform_normal
 
 train_data = OxfordIIITPet(root='./data', split='trainval', download=False, transform=train_transform)
-test_data = OxfordIIITPet(root='./data', split='test', download=False, transform=transform_normal)
+test_data = OxfordIIITPet(root='./data', split='test', download=False, transform=test_transform)
 
 n_val = int(len(train_data) * 0.15)
 n_train = len(train_data) - n_val
@@ -98,15 +110,18 @@ test_loader = DataLoader(test_data, batch_size=32)
 print(f"Train: {len(train_data)} | Val: {len(val_data)} | Test: {len(test_data)}")
 
 model = config["model"].to(DEVICE)
-criterion = nn.CrossEntropyLoss()
+criterion = nn.CrossEntropyLoss(label_smoothing=config.get("label_smoothing", 0.0))
 
+weight_decay = config.get("weight_decay", 0.0)
 if config["optimizer"] == "adam":
-    optimizer = optim.Adam(model.parameters(), lr=config["lr"])
+    optimizer = optim.Adam(model.parameters(), lr=config["lr"], weight_decay=weight_decay)
+elif config["optimizer"] == "adamw":
+    optimizer = optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=weight_decay)
 else:
-    optimizer = optim.SGD(model.parameters(), lr=config["lr"], momentum=0.9)
+    optimizer = optim.SGD(model.parameters(), lr=config["lr"], momentum=0.9, weight_decay=weight_decay)
 
-EPOCHS = 40
-patience = 7
+EPOCHS = 50
+patience = 10
 no_improve = 0
 best_val_acc = 0
 
@@ -115,6 +130,10 @@ val_acc_history = []
 
 os.makedirs("plots", exist_ok=True)
 os.makedirs("models", exist_ok=True)
+
+scheduler = None
+if config.get("scheduler") == "cosine":
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
 for epoch in range(1, EPOCHS + 1):
 
@@ -153,7 +172,11 @@ for epoch in range(1, EPOCHS + 1):
     train_acc_history.append(train_acc)
     val_acc_history.append(val_acc)
 
-    print(f"Epoch {epoch}/{EPOCHS} | Train: {train_acc:.3f} | Val: {val_acc:.3f}")
+    current_lr = optimizer.param_groups[0]["lr"]
+    print(f"Epoch {epoch}/{EPOCHS} | Train: {train_acc:.3f} | Val: {val_acc:.3f} | LR: {current_lr:.6f}")
+
+    if scheduler is not None:
+        scheduler.step()
 
     # Early stopping
     if val_acc > best_val_acc:
